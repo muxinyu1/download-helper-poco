@@ -1,10 +1,13 @@
 #include <Poco/Net/HTTPClientSession.h>
-#include <Poco/Net/HTTPSClientSession.h>
 #include <Poco/Net/HTTPRequest.h>
 #include <Poco/Net/HTTPResponse.h>
-#include <Poco/URI.h>
-#include <Poco/StreamCopier.h>
+#include <Poco/Net/HTTPSClientSession.h>
 #include <Poco/Path.h>
+#include <Poco/StreamCopier.h>
+#include <Poco/URI.h>
+#include <fmt/color.h>
+#include <fmt/core.h>
+#include <fmt/format.h>
 
 #include <cstdio>
 #include <fstream>
@@ -13,49 +16,48 @@
 #include <thread>
 #include <vector>
 
-#include "include/fmt/core.h"
-#include "include/fmt/format.h"
-#include "include/fmt/color.h"
 #include "include/indicators/indicators.hpp"
 
 static void update_progress(size_t current, size_t total,
-                            indicators::ProgressBar * bar) {
+                            indicators::ProgressBar* bar) {
   using namespace indicators;
-  
+
   if (current < total) {
     // fmt::println("percentage = {}", percentage);
     bar->set_progress(100.0 * current / total);
     // fmt::println("progress = {}", 100.0 * current / total);
     // fmt::println("{} / {}", current, total);
   } else {
-    bar->set_option(
-      option::ForegroundColor{Color::green}
-    );
+    bar->set_option(option::ForegroundColor{Color::green});
     bar->set_progress(100);
     bar->mark_as_completed();
   }
 }
 
-static std::unique_ptr<Poco::Net::HTTPClientSession> create_client(const std::string& url) {
+static std::unique_ptr<Poco::Net::HTTPClientSession> create_client(
+    const std::string& url) {
   Poco::URI uri{url};
   if (uri.getScheme() == "https") {
-    Poco::Net::Context::Ptr p_context = new Poco::Net::Context(Poco::Net::Context::CLIENT_USE, "", "", "", Poco::Net::Context::VERIFY_NONE);
-    Poco::Net::HTTPSClientSession client{uri.getHost(), uri.getPort(), p_context};
-    return std::make_unique<Poco::Net::HTTPSClientSession>(uri.getHost(), uri.getPort(), p_context);
+    Poco::Net::Context::Ptr p_context =
+        new Poco::Net::Context(Poco::Net::Context::CLIENT_USE, "", "", "",
+                               Poco::Net::Context::VERIFY_NONE);
+    Poco::Net::HTTPSClientSession client{uri.getHost(), uri.getPort(),
+                                         p_context};
+    return std::make_unique<Poco::Net::HTTPSClientSession>(
+        uri.getHost(), uri.getPort(), p_context);
   } else if (uri.getScheme() == "http") {
-    return std::make_unique<Poco::Net::HTTPClientSession>(uri.getHost(), uri.getPort());
+    return std::make_unique<Poco::Net::HTTPClientSession>(uri.getHost(),
+                                                          uri.getPort());
   }
   // TODO: Other Protocols
-  return std::make_unique<Poco::Net::HTTPClientSession>(uri.getHost(), uri.getPort());
+  return std::make_unique<Poco::Net::HTTPClientSession>(uri.getHost(),
+                                                        uri.getPort());
 }
 
 static void download_part(const size_t start_bytes, const size_t end_bytes,
                           const std::string& url, const std::string& output,
-                          const int thread_id, indicators::ProgressBar * bar,
-                          std::mutex* mtx,
-                          size_t* main_thread_downloaded
-                          ) {
-  
+                          const int thread_id, indicators::ProgressBar* bar,
+                          std::mutex* mtx, size_t* main_thread_downloaded) {
   auto client = create_client(url);
   Poco::Net::HTTPRequest request{};
   request.set("Range", fmt::format("bytes={}-{}", start_bytes, end_bytes));
@@ -140,9 +142,13 @@ void download(const std::string& url, const std::string& output,
   using namespace indicators;
 
   Poco::URI uri{url};
-  fmt::print(fmt::fg(fmt::color::yellow) | fmt::emphasis::bold, "Try Downloading ");
-  fmt::print(fmt::fg(fmt::color::purple) | fmt::emphasis::underline | fmt::emphasis::bold, "{}", output);
-  fmt::print(fmt::fg(fmt::color::yellow) | fmt::emphasis::bold, " from {}...\n", uri.getHost());
+  fmt::print(fmt::fg(fmt::color::yellow) | fmt::emphasis::bold,
+             "Try Downloading ");
+  fmt::print(fmt::fg(fmt::color::purple) | fmt::emphasis::underline |
+                 fmt::emphasis::bold,
+             "{}", output);
+  fmt::print(fmt::fg(fmt::color::yellow) | fmt::emphasis::bold, " from {}...\n",
+             uri.getHost());
   const auto content_length = get_content_length(url);
 
   // fmt::println("file-size={}B", content_length);
@@ -155,21 +161,20 @@ void download(const std::string& url, const std::string& output,
   // std::mutex mtx{};
 
   ProgressBar main_thread_bar{
-    option::PrefixText{"Main Thread"}, 
-    option::ForegroundColor{Color::cyan},
-    option::FontStyles{std::vector<FontStyle>{FontStyle::bold}},
-    option::Fill{"="},
-    option::Remainder{" "},
-    option::Lead{">"},
-    option::ShowPercentage{true},
-    option::BarWidth{20},
-    option::PostfixText{""}
-  };
+      option::PrefixText{"Main Thread"},
+      option::ForegroundColor{Color::cyan},
+      option::FontStyles{std::vector<FontStyle>{FontStyle::bold}},
+      option::Fill{"="},
+      option::Remainder{" "},
+      option::Lead{">"},
+      option::ShowPercentage{true},
+      option::BarWidth{20},
+      option::PostfixText{""}};
   bars.push_back(main_thread_bar);
   // ProgressBar** child_thread_bars = new ProgressBar*[concurrency];
   // for (int i = 0; i < concurrency; ++i) {
   //   child_thread_bars[i] = new ProgressBar(
-  //     option::PrefixText{fmt::format("Thread: {}", i)}, 
+  //     option::PrefixText{fmt::format("Thread: {}", i)},
   //     option::ForegroundColor{Color::cyan},
   //     option::FontStyles{std::vector<FontStyle>{FontStyle::bold}},
   //     option::Fill{"😅"},
@@ -177,19 +182,15 @@ void download(const std::string& url, const std::string& output,
   //     option::Lead{"😄"}
   //   );
   // }
-  std::unique_ptr<std::unique_ptr<ProgressBar>[]> child_thread_bars{new std::unique_ptr<ProgressBar>[concurrency]};
+  std::unique_ptr<std::unique_ptr<ProgressBar>[]> child_thread_bars{
+      new std::unique_ptr<ProgressBar>[concurrency]};
   for (int i = 0; i < concurrency; ++i) {
     child_thread_bars[i].reset(new ProgressBar(
-      option::PrefixText{fmt::format("Thread: {}", i)}, 
-      option::ForegroundColor{Color::cyan},
-      option::FontStyles{std::vector<FontStyle>{FontStyle::bold}},
-      option::ShowPercentage{true},
-      option::Fill{"="},
-    option::Remainder{" "},
-    option::Lead{">"},
-      option::BarWidth{20},
-    option::PostfixText{""}
-    ));
+        option::PrefixText{fmt::format("Thread: {}", i)},
+        option::ForegroundColor{Color::cyan},
+        option::FontStyles{std::vector<FontStyle>{FontStyle::bold}},
+        option::ShowPercentage{true}, option::Fill{"="}, option::Remainder{" "},
+        option::Lead{">"}, option::BarWidth{20}, option::PostfixText{""}));
   }
 
   for (int i = 0; i < concurrency; ++i) {
@@ -216,7 +217,8 @@ void download(const std::string& url, const std::string& output,
       end_bytes += remaining_bytes;
     }
     threads.emplace_back(download_part, start_bytes, end_bytes, url, output, i,
-                         &(*child_thread_bars[i]), &mtx, &main_thread_downloaded);
+                         &(*child_thread_bars[i]), &mtx,
+                         &main_thread_downloaded);
   }
 
   bool finished = false;
@@ -243,7 +245,9 @@ void download(const std::string& url, const std::string& output,
   // std::lock_guard<std::mutex> lock{mtx};
   bars[0].mark_as_completed();
 
-  fmt::print(fmt::fg(fmt::color::green) | fmt::emphasis::bold | fmt::emphasis::italic, "✔ Downloaded\n");
+  fmt::print(
+      fmt::fg(fmt::color::green) | fmt::emphasis::bold | fmt::emphasis::italic,
+      "✔ Downloaded\n");
   // gc
   // for (int i = 0; i < concurrency; ++i) {
   //   delete child_thread_bars[i];

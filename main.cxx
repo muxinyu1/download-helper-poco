@@ -1,4 +1,6 @@
-#include "include/fmt/format.h"
+#include <fmt/format.h>
+#include <fmt/color.h>
+
 #include "include/indicators/indicators.hpp"
 #include "include/cxxopts/cxxopts.hpp"
 
@@ -18,10 +20,19 @@ int main(int argc, char *argv[]) {
 		if (output.empty()) {
 			output = url.substr(url.find_last_of('/') + 1);
 		}
+		try {
 		// fmt::println("url={}, output={}, concurrency={}", url, output, concurrency);
 		download(url, output, concurrency);
+		} catch (const std::exception& e) {
+			fmt::println(": {}", e.what());
+			fmt::print(fmt::fg(fmt::color::red) | fmt::emphasis::bold, "Error");
+			exit(EXIT_FAILURE);
+		}
 	} catch (const std::exception& e) {
-		fmt::println("Error: {}", e.what());
+		fmt::print(fmt::fg(fmt::color::red) | fmt::emphasis::bold, "Error");
+		fmt::println(": {}", e.what());
+		
+		fmt::println("{}", options.help());
 		exit(EXIT_FAILURE);
 	}
 	return 0;
