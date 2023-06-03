@@ -18,6 +18,7 @@
 #include <thread>
 #include <utility>
 #include <vector>
+#include <filesystem>
 
 #include "include/indicators/indicators.hpp"
 
@@ -68,8 +69,8 @@ static void download_part(const size_t start_bytes, const size_t end_bytes,
 
   if (response.getStatus() == Poco::Net::HTTPResponse::HTTP_PARTIAL_CONTENT) {
     try {
-      std::ofstream out{fmt::format("{}.part{}", output, thread_id),
-                        std::ios::out | std::ios::trunc | std::ios::binary};
+      const auto path = std::filesystem::temp_directory_path() / fmt::format("{}.part{}", output, thread_id);
+      std::ofstream out{path, std::ios::out | std::ios::trunc | std::ios::binary};
       char buffer[1024];
       const auto total = end_bytes - start_bytes + 1;
       size_t downloaded = 0;
@@ -144,6 +145,36 @@ static std::pair<size_t, bool> get_content_length(const std::string& url) {
     exit(EXIT_FAILURE);
   }
   return {0, false};
+}
+
+void combine(const std::string& output, const int concurrency) {
+  try {
+    std::ofstream out{output,
+                      std::ios::out | std::ios::trunc | std::ios::binary};
+    if (out.is_open()) {
+      for (int i = 0; i < concurrency; ++i) {
+        const auto part_file = (std::filesystem::temp_directory_path() / fmt::format("{}.part{}", output, i));
+        std::ifstream in{part_file, std::ios::binary};
+        if (in.is_open()) {
+          out << in.rdbuf();
+        } else {
+          fmt::println("Error: Could not open file: {}", part_file.string());
+          exit(EXIT_FAILURE);
+        }
+        in.close();
+
+        // Delete temp file
+        std::remove(part_file.c_str());
+      }
+      out.close();
+    } else {
+      fmt::println("Error: Could not open file: {}", output);
+      exit(EXIT_FAILURE);
+    }
+  } catch (const std::exception& e) {
+    fmt::println("Error: {}", e.what());
+    exit(EXIT_FAILURE);
+  }
 }
 
 void download(const std::string& url, const std::string& output, int concurrency) {
@@ -271,31 +302,5 @@ void download(const std::string& url, const std::string& output, int concurrency
   // delete[] child_thread_bars;
 
   // Combine files
-  try {
-    std::ofstream out{output,
-                      std::ios::out | std::ios::trunc | std::ios::binary};
-    if (out.is_open()) {
-      for (int i = 0; i < concurrency; ++i) {
-        const auto part_file = fmt::format("{}.part{}", output, i);
-        std::ifstream in{part_file, std::ios::binary};
-        if (in.is_open()) {
-          out << in.rdbuf();
-        } else {
-          fmt::println("Error: Could not open file: {}", part_file);
-          exit(EXIT_FAILURE);
-        }
-        in.close();
-
-        // Delete temp file
-        std::remove(part_file.c_str());
-      }
-      out.close();
-    } else {
-      fmt::println("Error: Could not open file: {}", output);
-      exit(EXIT_FAILURE);
-    }
-  } catch (const std::exception& e) {
-    fmt::println("Error: {}", e.what());
-    exit(EXIT_FAILURE);
-  }
+  combine(output, concurrency);
 }
