@@ -11,12 +11,19 @@ int main(int argc, char *argv[]) {
   options.add_options()
   ("u,url", "File Url", cxxopts::value<std::string>(), "File Url")
   ("o,output", "Output File Name", cxxopts::value<std::string>()->default_value(""), "Output File Name")
+  ("h,help", "Show Helps")
   ("n,concurrency", "Thread Number", cxxopts::value<int>()->default_value("8"), "Thread Num");
 	try {
 		auto result = options.parse(argc, argv);
 		const auto url = result["url"].as<std::string>();
 		auto output = result["output"].as<std::string>();
 		const auto concurrency = result["concurrency"].as<int>();
+
+		// Show Help
+		if (result.count("help")) {
+			fmt::println("{}", options.help());
+		}
+
 		if (output.empty()) {
 			output = url.substr(url.find_last_of('/') + 1);
 		}

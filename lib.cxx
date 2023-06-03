@@ -2,9 +2,11 @@
 #include <Poco/Net/HTTPRequest.h>
 #include <Poco/Net/HTTPResponse.h>
 #include <Poco/Net/HTTPSClientSession.h>
+#include <Poco/Net/HTTPSStreamFactory.h>
 #include <Poco/Path.h>
 #include <Poco/StreamCopier.h>
 #include <Poco/URI.h>
+#include <cstddef>
 #include <fmt/color.h>
 #include <fmt/core.h>
 #include <fmt/format.h>
@@ -14,6 +16,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "include/indicators/indicators.hpp"
@@ -38,20 +41,17 @@ static std::unique_ptr<Poco::Net::HTTPClientSession> create_client(
     const std::string& url) {
   Poco::URI uri{url};
   if (uri.getScheme() == "https") {
-    Poco::Net::Context::Ptr p_context =
-        new Poco::Net::Context(Poco::Net::Context::CLIENT_USE, "", "", "",
-                               Poco::Net::Context::VERIFY_NONE);
-    Poco::Net::HTTPSClientSession client{uri.getHost(), uri.getPort(),
-                                         p_context};
-    return std::make_unique<Poco::Net::HTTPSClientSession>(
-        uri.getHost(), uri.getPort(), p_context);
+    // Poco::Net::Context::Ptr p_context =
+    //     new Poco::Net::Context(Poco::Net::Context::CLIENT_USE, "", "", "",
+    //                            Poco::Net::Context::VERIFY_NONE);
+    // Poco::Net::HTTPSClientSession client{uri.getHost(), uri.getPort(),
+    //                                      p_context};
+    return std::make_unique<Poco::Net::HTTPSClientSession>(uri.getHost(), uri.getPort());
   } else if (uri.getScheme() == "http") {
-    return std::make_unique<Poco::Net::HTTPClientSession>(uri.getHost(),
-                                                          uri.getPort());
+    return std::make_unique<Poco::Net::HTTPClientSession>(uri.getHost(), uri.getPort());
   }
   // TODO: Other Protocols
-  return std::make_unique<Poco::Net::HTTPClientSession>(uri.getHost(),
-                                                        uri.getPort());
+  return std::make_unique<Poco::Net::HTTPClientSession>(uri.getHost(), uri.getPort());
 }
 
 static void download_part(const size_t start_bytes, const size_t end_bytes,
@@ -102,16 +102,13 @@ static void download_part(const size_t start_bytes, const size_t end_bytes,
     }
 
   } else {
-    fmt::println("Error: Thread {} reponse code is not HTTP_PARTIAL_CONTENT",
-                 thread_id);
+    fmt::print(fmt::fg(fmt::color::red) | fmt::emphasis::bold, "Error: Url Does NOT Support Multithreading\n");
     return;
   }
 }
 
-/// @brief Get content length from url
-/// @param url http url
-/// @return content length
-static size_t get_content_length(const std::string& url) {
+
+static std::pair<size_t, bool> get_content_length(const std::string& url) {
   // fmt::println("Getting content length...");
   try {
     Poco::URI uri{url};
@@ -125,7 +122,19 @@ static size_t get_content_length(const std::string& url) {
     client->receiveResponse(response);
 
     if (response.getStatus() == Poco::Net::HTTPResponse::HTTP_OK) {
-      return response.getContentLength64();
+      const auto content_length = response.getContentLength64();
+      // Try Sending Partial File Request
+      Poco::Net::HTTPRequest request{};
+      request.set("Range", fmt::format("bytes={}-{}", 0, 0));
+      client->sendRequest(request);
+      Poco::Net::HTTPResponse response{};
+      client->receiveResponse(response);
+      // According Response, Return If Server Support Multithreading
+      if (response.getStatus() == Poco::Net::HTTPResponse::HTTP_PARTIAL_CONTENT) {
+        return {content_length, true};
+      } else {
+        return {content_length, false};
+      }
     } else {
       fmt::println("Error: Response Status is not 200");
       exit(EXIT_FAILURE);
@@ -134,12 +143,13 @@ static size_t get_content_length(const std::string& url) {
     fmt::println("Error: {}", e.what());
     exit(EXIT_FAILURE);
   }
-  return 0;
+  return {0, false};
 }
 
-void download(const std::string& url, const std::string& output,
-              const int concurrency) {
+void download(const std::string& url, const std::string& output, int concurrency) {
   using namespace indicators;
+
+  // Poco::Net::HTTPSStreamFactory::registerFactory();
 
   Poco::URI uri{url};
   fmt::print(fmt::fg(fmt::color::yellow) | fmt::emphasis::bold,
@@ -149,8 +159,12 @@ void download(const std::string& url, const std::string& output,
              "{}", output);
   fmt::print(fmt::fg(fmt::color::yellow) | fmt::emphasis::bold, " from {}...\n",
              uri.getHost());
-  const auto content_length = get_content_length(url);
+  const auto [content_length, support_multithreading] = get_content_length(url);
 
+  // Single Thread Download
+  if (!support_multithreading) {
+    concurrency = 1;
+  }
   // fmt::println("file-size={}B", content_length);
 
   const auto bytes_per_thread = content_length / (size_t)concurrency;
@@ -248,6 +262,8 @@ void download(const std::string& url, const std::string& output,
   fmt::print(
       fmt::fg(fmt::color::green) | fmt::emphasis::bold | fmt::emphasis::italic,
       "✔ Downloaded\n");
+
+  // Poco::Net::HTTPSStreamFactory::unregisterFactory();
   // gc
   // for (int i = 0; i < concurrency; ++i) {
   //   delete child_thread_bars[i];
