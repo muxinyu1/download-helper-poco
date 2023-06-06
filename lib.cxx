@@ -6,9 +6,11 @@
 #include <Poco/Path.h>
 #include <Poco/StreamCopier.h>
 #include <Poco/URI.h>
+#include <cstdlib>
 #include <fmt/color.h>
 #include <fmt/core.h>
 #include <fmt/format.h>
+#include <memory>
 #include <sqlite3.h>
 
 #include <concepts>
@@ -29,7 +31,7 @@
 static DownloadState state;
 
 static void update_progress(size_t current, size_t total, int thread_id,
-                            indicators::ProgressBar* bar) {
+                            indicators::ProgressBar *bar) {
   using namespace indicators;
 
   if (current < total) {
@@ -48,44 +50,43 @@ static void update_progress(size_t current, size_t total, int thread_id,
   }
 }
 
-static std::unique_ptr<Poco::Net::HTTPClientSession> create_client(
-    const std::string& url) {
+static std::unique_ptr<Poco::Net::HTTPClientSession>
+create_client(const std::string &url) {
   Poco::URI uri{url};
   if (uri.getScheme() == "https") {
-    // Poco::Net::Context::Ptr p_context =
-    //     new Poco::Net::Context(Poco::Net::Context::CLIENT_USE, "", "", "",
-    //                            Poco::Net::Context::VERIFY_NONE);
-    // Poco::Net::HTTPSClientSession client{uri.getHost(), uri.getPort(),
-    //                                      p_context};
-    return std::make_unique<Poco::Net::HTTPSClientSession>(uri.getHost(),
-                                                           uri.getPort());
+    Poco::Net::Context::Ptr context = new Poco::Net::Context(Poco::Net::Context::CLIENT_USE, "", "", "", Poco::Net::Context::VERIFY_NONE);
+    auto session = std::make_unique<Poco::Net::HTTPSClientSession>(uri.getHost(), uri.getPort(), context);
+    session->setKeepAlive(true);
+    return session;
   } else if (uri.getScheme() == "http") {
-    return std::make_unique<Poco::Net::HTTPClientSession>(uri.getHost(),
-                                                          uri.getPort());
+    auto session = std::make_unique<Poco::Net::HTTPClientSession>(uri.getHost(), uri.getPort());
+    session->setKeepAlive(true);
+    return session;
   }
   // TODO: Other Protocols
-  return std::make_unique<Poco::Net::HTTPClientSession>(uri.getHost(),
-                                                        uri.getPort());
+  return std::make_unique<Poco::Net::HTTPClientSession>(uri.getHost(), uri.getPort());
 }
 
 static void download_part(const size_t start_bytes, const size_t end_bytes,
-                          const std::string& url, const std::string& output,
-                          const int thread_id, indicators::ProgressBar* bar,
-                          std::mutex* mtx, size_t* main_thread_downloaded) {
+                          const std::string &url, const std::string &output,
+                          const int thread_id, indicators::ProgressBar *bar,
+                          std::mutex *mtx, size_t *main_thread_downloaded, bool single_thread) {
   auto client = create_client(url);
   Poco::Net::HTTPRequest request{};
   request.set("Range", fmt::format("bytes={}-{}", start_bytes, end_bytes));
 
   client->sendRequest(request);
   Poco::Net::HTTPResponse response{};
-  auto& stream = client->receiveResponse(response);
+  auto &stream = client->receiveResponse(response);
 
-  if (response.getStatus() == Poco::Net::HTTPResponse::HTTP_PARTIAL_CONTENT) {
+  if (response.getStatus() == Poco::Net::HTTPResponse::HTTP_PARTIAL_CONTENT || single_thread) {
     try {
       const auto path = std::filesystem::temp_directory_path() /
                         fmt::format("{}.part{}", output, thread_id);
       std::ofstream out{path,
                         std::ios::out | std::ios::trunc | std::ios::binary};
+      
+      state.streams.emplace_back(&out);
       char buffer[1024];
       const auto total = end_bytes - start_bytes + 1;
       size_t downloaded = 0;
@@ -112,7 +113,7 @@ static void download_part(const size_t start_bytes, const size_t end_bytes,
         out.write(buffer, stream.gcount());
       }
       out.close();
-    } catch (const std::exception& e) {
+    } catch (const std::exception &e) {
       fmt::println("Error: {}", e.what());
       return;
     }
@@ -124,7 +125,7 @@ static void download_part(const size_t start_bytes, const size_t end_bytes,
   }
 }
 
-static std::pair<size_t, bool> get_content_length(const std::string& url) {
+static std::pair<size_t, bool> get_content_length(const std::string &url) {
   // fmt::println("Getting content length...");
   try {
     Poco::URI uri{url};
@@ -156,14 +157,14 @@ static std::pair<size_t, bool> get_content_length(const std::string& url) {
       fmt::println("Error: Response Status is not 200");
       exit(EXIT_FAILURE);
     }
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     fmt::println("Error: {}", e.what());
     exit(EXIT_FAILURE);
   }
   return {0, false};
 }
 
-void combine(const std::string& output, const int concurrency) {
+void combine(const std::string &output, const int concurrency) {
   try {
     std::ofstream out{output,
                       std::ios::out | std::ios::trunc | std::ios::binary};
@@ -188,13 +189,13 @@ void combine(const std::string& output, const int concurrency) {
       fmt::println("Error: Could not open file: {}", output);
       exit(EXIT_FAILURE);
     }
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     fmt::println("Error: {}", e.what());
     exit(EXIT_FAILURE);
   }
 }
 
-void download(const std::string& url, const std::string& output,
+void download(const std::string &url, const std::string &output,
               int concurrency) {
   using namespace indicators;
 
@@ -287,7 +288,7 @@ void download(const std::string& url, const std::string& output,
     }
     threads.emplace_back(download_part, start_bytes, end_bytes, url, output, i,
                          &(*child_thread_bars[i]), &mtx,
-                         &main_thread_downloaded);
+                         &main_thread_downloaded, !support_multithreading);
   }
 
   bool finished = false;
@@ -308,15 +309,15 @@ void download(const std::string& url, const std::string& output,
   bars[0].set_option(option::ForegroundColor{Color::green});
 
   // Wait for finished
-  for (auto& thread : threads) {
+  for (auto &thread : threads) {
     thread.join();
   }
   // std::lock_guard<std::mutex> lock{mtx};
   bars[0].mark_as_completed();
 
-  fmt::print(
-      fmt::fg(fmt::color::green) | fmt::emphasis::bold | fmt::emphasis::italic,
-      "✔ Downloaded\n");
+  fmt::print(fmt::fg(fmt::color::green) | fmt::emphasis::bold |
+                 fmt::emphasis::italic,
+             "✔ Downloaded\n");
 
   // Poco::Net::HTTPSStreamFactory::unregisterFactory();
   // gc
@@ -330,56 +331,85 @@ void download(const std::string& url, const std::string& output,
 }
 
 namespace database {
-bool download_state_table_exists(sqlite3* db) {
-  const char sql[] = "select from sqlite_master where type = \'table\' and name = \'DownloadState\'";
+bool download_state_table_exists(sqlite3 *db) {
+  const char sql[] =
+      "select from sqlite_master where type = \'table\' and name = "
+      "\'DownloadState\'";
   bool exist = false;
-  sqlite3_exec(db, sql, [](void* exist, int, char**, char**) {
-    *(bool*)exist = true;
-    return 0;
-  }, &exist, nullptr);
+  sqlite3_exec(
+      db, sql,
+      [](void *exist, int, char **, char **) {
+        *(bool *)exist = true;
+        return 0;
+      },
+      &exist, nullptr);
   return exist;
 }
 
-void create_download_state_table(sqlite3* db) {
-  const char sql[] = "create table DownloadState(url text primary key, state blob)";
+void create_download_state_table(sqlite3 *db) {
+  const char sql[] =
+      "create table DownloadState(url text primary key, state text)";
   sqlite3_exec(db, sql, nullptr, nullptr, nullptr);
 }
 
-bool primary_key_exists(sqlite3* db, const auto& primary_key) {
+bool primary_key_exists(sqlite3 *db, const auto &primary_key) {
   bool exist = false;
-  const auto sql = fmt::format("select exists (select 1 from DownloadState where url = \'{}\')", primary_key);
-  sqlite3_exec(db, sql.c_str(), [](void* exist, int, char**, char**) {
-    *(bool*)exist = true;
-    return 0;
-  }, &exist, nullptr);
+  const auto sql = fmt::format(
+      "select exists (select 1 from DownloadState where url = \'{}\')",
+      primary_key);
+  sqlite3_exec(
+      db, sql.c_str(),
+      [](void *exist, int, char **, char **) {
+        *(bool *)exist = true;
+        return 0;
+      },
+      &exist, nullptr);
   return exist;
 }
 
-void update(sqlite3* db, const auto& primary_key, const auto& data) {}
+void update(sqlite3 *db, const auto &primary_key, const auto &data) {
+  const auto sql =
+      fmt::format("update DownloadState set state = \'{}\' where url = \'{}\'",
+                  data, primary_key);
+  sqlite3_exec(db, sql.c_str(), nullptr, nullptr, nullptr);
+}
 
-void insert(sqlite3* db, const auto& primary_key, const auto& data) {}
-}  // namespace database
+void insert(sqlite3 *db, const auto &primary_key, const auto &data) {
+  const auto sql =
+      fmt::format("insert into DownloadState (url, data) values({}, {})",
+                  primary_key, data);
+  sqlite3_exec(db, sql.c_str(), nullptr, nullptr, nullptr);
+}
+} // namespace database
 
 namespace boost::archive {
 template <typename T>
-concept serializable = requires(T t, std::ostream& os) {
+concept serializable = requires(T t, std::ostream &os) {
   { (t.serialize(os, 0)) } -> std::same_as<void>;
 };
 }
 
 template <typename T>
   requires boost::archive::serializable<T>
-auto to_data(const T& data) {
+auto to_data(const T &data) {
   std::ostringstream oss{};
-  boost::archive::binary_oarchive oa{oss};
+  boost::archive::text_oarchive oa{oss};
   oa << data;
   return oss.str();
 }
 
 void suspend(int) {
   using namespace database;
+  //TODO: Stop downloading
+
+
+  if (!std::filesystem::exists("data.db")) {
+    // Create database
+    std::ofstream ofs{"data.db"};
+    ofs.close();
+  }
   // Save download state
-  sqlite3* db;
+  sqlite3 *db;
   if (sqlite3_open("data.db", &db) != SQLITE_OK) {
     std::cerr << "Could not open \'data.db\'" << std::endl;
     sqlite3_close(db);
@@ -390,10 +420,11 @@ void suspend(int) {
   }
   const auto primary_key = state.url;
   const auto data = to_data(state);
-  if (primary_key_exists(primary_key)) {
-    update(primary_key, data);
+  if (primary_key_exists(db, primary_key)) {
+    update(db, primary_key, data);
   } else {
-    insert(primary_key, data);
+    insert(db, primary_key, data);
   }
-  fmt::print(fmt::fg(fmt::color::blue) | fmt::emphasis::bold, "Suspend");
+  fmt::print(fmt::fg(fmt::color::blue) | fmt::emphasis::bold, "Suspend\n");
+  exit(EXIT_SUCCESS);
 }
