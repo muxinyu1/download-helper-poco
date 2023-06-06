@@ -1,12 +1,18 @@
 #include <fmt/format.h>
 #include <fmt/color.h>
 
+#include <csignal>
+
 #include "include/indicators/indicators.hpp"
 #include "include/cxxopts/cxxopts.hpp"
 
 extern void download(const std::string& url, const std::string& output, const int concurrency);
 
-int main(int argc, char *argv[]) { 
+extern void suspend(int);
+
+int main(int argc, char *argv[]) {
+  signal(SIGINT, suspend);
+
   cxxopts::Options options{"Download Helper", "A Download Helper"};
   options.add_options()
   ("u,url", "File Url", cxxopts::value<std::string>(), "File Url")

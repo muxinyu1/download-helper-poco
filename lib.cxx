@@ -6,32 +6,42 @@
 #include <Poco/Path.h>
 #include <Poco/StreamCopier.h>
 #include <Poco/URI.h>
-#include <cstddef>
 #include <fmt/color.h>
 #include <fmt/core.h>
 #include <fmt/format.h>
+#include <sqlite3.h>
 
+#include <concepts>
+#include <cstddef>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
-#include <filesystem>
 
+#include "DownloadState.hxx"
 #include "include/indicators/indicators.hpp"
 
-static void update_progress(size_t current, size_t total,
+static DownloadState state;
+
+static void update_progress(size_t current, size_t total, int thread_id,
                             indicators::ProgressBar* bar) {
   using namespace indicators;
 
   if (current < total) {
     // fmt::println("percentage = {}", percentage);
     bar->set_progress(100.0 * current / total);
+    // Update download state
+    state.progresses[thread_id] = current;
     // fmt::println("progress = {}", 100.0 * current / total);
     // fmt::println("{} / {}", current, total);
   } else {
+    // Update download state
+    state.progresses[thread_id] = total;
     bar->set_option(option::ForegroundColor{Color::green});
     bar->set_progress(100);
     bar->mark_as_completed();
@@ -47,12 +57,15 @@ static std::unique_ptr<Poco::Net::HTTPClientSession> create_client(
     //                            Poco::Net::Context::VERIFY_NONE);
     // Poco::Net::HTTPSClientSession client{uri.getHost(), uri.getPort(),
     //                                      p_context};
-    return std::make_unique<Poco::Net::HTTPSClientSession>(uri.getHost(), uri.getPort());
+    return std::make_unique<Poco::Net::HTTPSClientSession>(uri.getHost(),
+                                                           uri.getPort());
   } else if (uri.getScheme() == "http") {
-    return std::make_unique<Poco::Net::HTTPClientSession>(uri.getHost(), uri.getPort());
+    return std::make_unique<Poco::Net::HTTPClientSession>(uri.getHost(),
+                                                          uri.getPort());
   }
   // TODO: Other Protocols
-  return std::make_unique<Poco::Net::HTTPClientSession>(uri.getHost(), uri.getPort());
+  return std::make_unique<Poco::Net::HTTPClientSession>(uri.getHost(),
+                                                        uri.getPort());
 }
 
 static void download_part(const size_t start_bytes, const size_t end_bytes,
@@ -69,8 +82,10 @@ static void download_part(const size_t start_bytes, const size_t end_bytes,
 
   if (response.getStatus() == Poco::Net::HTTPResponse::HTTP_PARTIAL_CONTENT) {
     try {
-      const auto path = std::filesystem::temp_directory_path() / fmt::format("{}.part{}", output, thread_id);
-      std::ofstream out{path, std::ios::out | std::ios::trunc | std::ios::binary};
+      const auto path = std::filesystem::temp_directory_path() /
+                        fmt::format("{}.part{}", output, thread_id);
+      std::ofstream out{path,
+                        std::ios::out | std::ios::trunc | std::ios::binary};
       char buffer[1024];
       const auto total = end_bytes - start_bytes + 1;
       size_t downloaded = 0;
@@ -86,14 +101,14 @@ static void download_part(const size_t start_bytes, const size_t end_bytes,
         mtx->unlock();
         downloaded += n;
         out.write(buffer, n);
-        update_progress(downloaded, total, bar);
+        update_progress(downloaded, total, thread_id, bar);
       }
       if (stream.gcount() > 0) {
         downloaded += stream.gcount();
         mtx->lock();
         *main_thread_downloaded += stream.gcount();
         mtx->unlock();
-        update_progress(downloaded, total, bar);
+        update_progress(downloaded, total, thread_id, bar);
         out.write(buffer, stream.gcount());
       }
       out.close();
@@ -103,11 +118,11 @@ static void download_part(const size_t start_bytes, const size_t end_bytes,
     }
 
   } else {
-    fmt::print(fmt::fg(fmt::color::red) | fmt::emphasis::bold, "Error: Url Does NOT Support Multithreading\n");
-    return;
+    fmt::print(fmt::fg(fmt::color::red) | fmt::emphasis::bold,
+               "Error: Url Does NOT Support Multithreading\n");
+    exit(EXIT_FAILURE);
   }
 }
-
 
 static std::pair<size_t, bool> get_content_length(const std::string& url) {
   // fmt::println("Getting content length...");
@@ -131,7 +146,8 @@ static std::pair<size_t, bool> get_content_length(const std::string& url) {
       Poco::Net::HTTPResponse response{};
       client->receiveResponse(response);
       // According Response, Return If Server Support Multithreading
-      if (response.getStatus() == Poco::Net::HTTPResponse::HTTP_PARTIAL_CONTENT) {
+      if (response.getStatus() ==
+          Poco::Net::HTTPResponse::HTTP_PARTIAL_CONTENT) {
         return {content_length, true};
       } else {
         return {content_length, false};
@@ -153,7 +169,8 @@ void combine(const std::string& output, const int concurrency) {
                       std::ios::out | std::ios::trunc | std::ios::binary};
     if (out.is_open()) {
       for (int i = 0; i < concurrency; ++i) {
-        const auto part_file = (std::filesystem::temp_directory_path() / fmt::format("{}.part{}", output, i));
+        const auto part_file = (std::filesystem::temp_directory_path() /
+                                fmt::format("{}.part{}", output, i));
         std::ifstream in{part_file, std::ios::binary};
         if (in.is_open()) {
           out << in.rdbuf();
@@ -177,9 +194,16 @@ void combine(const std::string& output, const int concurrency) {
   }
 }
 
-void download(const std::string& url, const std::string& output, int concurrency) {
+void download(const std::string& url, const std::string& output,
+              int concurrency) {
   using namespace indicators;
 
+  state.url = url;
+  state.output = output;
+  state.concurrency = concurrency;
+  for (int i = 0; i < concurrency; ++i) {
+    state.progresses.push_back(0);
+  }
   // Poco::Net::HTTPSStreamFactory::registerFactory();
 
   Poco::URI uri{url};
@@ -303,4 +327,73 @@ void download(const std::string& url, const std::string& output, int concurrency
 
   // Combine files
   combine(output, concurrency);
+}
+
+namespace database {
+bool download_state_table_exists(sqlite3* db) {
+  const char sql[] = "select from sqlite_master where type = \'table\' and name = \'DownloadState\'";
+  bool exist = false;
+  sqlite3_exec(db, sql, [](void* exist, int, char**, char**) {
+    *(bool*)exist = true;
+    return 0;
+  }, &exist, nullptr);
+  return exist;
+}
+
+void create_download_state_table(sqlite3* db) {
+  const char sql[] = "create table DownloadState(url text primary key, state blob)";
+  sqlite3_exec(db, sql, nullptr, nullptr, nullptr);
+}
+
+bool primary_key_exists(sqlite3* db, const auto& primary_key) {
+  bool exist = false;
+  const auto sql = fmt::format("select exists (select 1 from DownloadState where url = \'{}\')", primary_key);
+  sqlite3_exec(db, sql.c_str(), [](void* exist, int, char**, char**) {
+    *(bool*)exist = true;
+    return 0;
+  }, &exist, nullptr);
+  return exist;
+}
+
+void update(sqlite3* db, const auto& primary_key, const auto& data) {}
+
+void insert(sqlite3* db, const auto& primary_key, const auto& data) {}
+}  // namespace database
+
+namespace boost::archive {
+template <typename T>
+concept serializable = requires(T t, std::ostream& os) {
+  { (t.serialize(os, 0)) } -> std::same_as<void>;
+};
+}
+
+template <typename T>
+  requires boost::archive::serializable<T>
+auto to_data(const T& data) {
+  std::ostringstream oss{};
+  boost::archive::binary_oarchive oa{oss};
+  oa << data;
+  return oss.str();
+}
+
+void suspend(int) {
+  using namespace database;
+  // Save download state
+  sqlite3* db;
+  if (sqlite3_open("data.db", &db) != SQLITE_OK) {
+    std::cerr << "Could not open \'data.db\'" << std::endl;
+    sqlite3_close(db);
+    return;
+  }
+  if (!download_state_table_exists(db)) {
+    create_download_state_table(db);
+  }
+  const auto primary_key = state.url;
+  const auto data = to_data(state);
+  if (primary_key_exists(primary_key)) {
+    update(primary_key, data);
+  } else {
+    insert(primary_key, data);
+  }
+  fmt::print(fmt::fg(fmt::color::blue) | fmt::emphasis::bold, "Suspend");
 }
