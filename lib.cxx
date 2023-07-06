@@ -376,7 +376,7 @@ void update(sqlite3 *db, const auto &primary_key, const auto &data) {
 
 void insert(sqlite3 *db, const auto &primary_key, const auto &data) {
   const auto sql =
-      fmt::format("insert into DownloadState (url, data) values({}, {})",
+      fmt::format("insert into DownloadState (url, state) values(\'{}\', \'{}\')",
                   primary_key, data);
   sqlite3_exec(db, sql.c_str(), nullptr, nullptr, nullptr);
 }
